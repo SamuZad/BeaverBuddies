@@ -18,7 +18,29 @@ namespace BeaverBuddies.IO
         {
             TypeNameHandling = TypeNameHandling.None,
             Formatting = Formatting.None,
+            ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+            ContractResolver = new UnityContractResolver(),
         };
+
+        private class UnityContractResolver : Newtonsoft.Json.Serialization.DefaultContractResolver
+        {
+            protected override IList<Newtonsoft.Json.Serialization.JsonProperty> CreateProperties(Type type, Newtonsoft.Json.MemberSerialization memberSerialization)
+            {
+                if (type.FullName == "UnityEngine.Vector3" || type.FullName == "UnityEngine.Vector3Int")
+                {
+                    var props = base.CreateProperties(type, memberSerialization);
+                    // Only serialize x, y, z
+                    return props.Where(p => p.PropertyName == "x" || p.PropertyName == "y" || p.PropertyName == "z").ToList();
+                }
+                if (type.FullName == "UnityEngine.Ray")
+                {
+                    var props = base.CreateProperties(type, memberSerialization);
+                    // Only serialize origin and direction
+                    return props.Where(p => p.PropertyName == "origin" || p.PropertyName == "direction").ToList();
+                }
+                return base.CreateProperties(type, memberSerialization);
+            }
+        }
 
         private static readonly Dictionary<string, Type> NameToType;
         private static readonly Dictionary<Type, string> TypeToName;

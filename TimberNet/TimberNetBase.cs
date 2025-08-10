@@ -1087,7 +1087,8 @@ namespace TimberNet
                                     int x = ReadVarInt32(bytes, ref idx);
                                     int y = ReadVarInt32(bytes, ref idx);
                                     int z = ReadVarInt32(bytes, ref idx);
-                                    arr.Add(new JArray(x,y,z));
+                                    // Use object form so Json.NET can populate List<Vector3Int>
+                                    arr.Add(new JObject { ["x"] = x, ["y"] = y, ["z"] = z });
                                 }
                                 obj[name] = arr;
                             }
