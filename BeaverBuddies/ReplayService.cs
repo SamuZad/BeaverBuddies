@@ -466,6 +466,12 @@ namespace BeaverBuddies
             EventIO.Get().WriteEvents(events.ToArray());
         }
 
+        public void FlushRecordedEvents()
+        {
+            // Allow explicit immediate network flush (e.g., unpausing while game speed 0 so ticks not advancing yet)
+            SendEvents();
+        }
+
         /**
          * Replays any pending events from the user or connected users
          * and then sends successful/pending events to connected users.

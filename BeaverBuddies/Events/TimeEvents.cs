@@ -44,6 +44,7 @@ namespace BeaverBuddies.Events
     public class SpeedChangePatcher
     {
         private static bool silently = false;
+        private static System.Reflection.FieldInfo _isLockedField;
 
         public static void SetSpeedSilently(SpeedManager speedManager, float speed)
         {
@@ -54,6 +55,20 @@ namespace BeaverBuddies.Events
 
         static bool Prefix(SpeedManager __instance, ref float speed)
         {
+            // During replay (processing network events), ensure lock doesn't suppress speed changes
+            if (ReplayService.IsReplayingEvents)
+            {
+                if (_isLockedField == null)
+                {
+                    _isLockedField = typeof(SpeedManager).GetField("_isLocked", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                }
+                if (_isLockedField != null)
+                {
+                    _isLockedField.SetValue(__instance, false);
+                }
+                // Don't record outgoing SpeedSetEvent for a replayed change.
+                return true;
+            }
             if (!ReplayService.IsLoaded) return true;
             // No need to log speed changes to current speed
             if (__instance.CurrentSpeed == speed) return true;
@@ -67,6 +82,12 @@ namespace BeaverBuddies.Events
             {
                 speed = speed
             });
+            // If we're a client (sending user events) and the game is paused (speed 0), ticks may not advance promptly.
+            // Flush immediately so host receives unpause request.
+            if (EventIO.Get()?.UserEventBehavior == UserEventBehavior.Send && __instance.CurrentSpeed == 0f && speed > 0f)
+            {
+                replayService.FlushRecordedEvents();
+            }
 
             if (EventIO.ShouldPlayPatchedEvents)
             {
@@ -141,8 +162,8 @@ namespace BeaverBuddies.Events
     {
         static bool Prefix(SpeedManager __instance)
         {
-            // Clients should never unfreeze for dialogs. See above.
-            if (EventIO.Get()?.UserEventBehavior == UserEventBehavior.Send)
+            // Block manual client dialog unlocks, but allow during replay of network events.
+            if (EventIO.Get()?.UserEventBehavior == UserEventBehavior.Send && !ReplayService.IsReplayingEvents)
             {
                 return false;
             }
