@@ -35,16 +35,22 @@ namespace BeaverBuddies.IO
 
         private static ReplayEvent ToEvent(JObject obj)
         {
-            //Plugin.Log($"Recieving {obj}");
+            // Fast path for minimal heartbeat objects (custom short form {"type":"H","ticksSinceLoad":N})
+            var typeToken = obj["type"];
+            if (typeToken != null && typeToken.Type == JTokenType.String && typeToken.Value<string>() == "H")
+            {
+                // Minimal construction without JSON polymorphism
+                return new HeartbeatEvent() { ticksSinceLoad = obj[TimberNetBase.TICKS_KEY]?.Value<int>() ?? 0 };
+            }
             try
             {
-                return JsonSettings.Deserialize<ReplayEvent>(obj.ToString());
+                return NetworkEventSerializer.Deserialize(obj);
             }
             catch (Exception ex)
             {
                 Plugin.Log(ex.ToString());
+                return null;
             }
-            return null;
         }
 
         public List<ReplayEvent> ReadEvents(int ticksSinceLoad)
@@ -61,9 +67,20 @@ namespace BeaverBuddies.IO
             if (NetBase == null) return;
             foreach (ReplayEvent e in events)
             {
-                // TODO: It is silly to convert to JObject here, but not sure if there's
-                // a better way to do it.
-                NetBase.DoUserInitiatedEvent(JObject.Parse(JsonSettings.Serialize(e)));
+                if (e is HeartbeatEvent)
+                {
+                    // Serialize minimal heartbeat JSON (avoid TypeNameHandling & extra fields)
+                    var hb = new JObject
+                    {
+                        [TimberNetBase.TICKS_KEY] = e.ticksSinceLoad,
+                        [TimberNetBase.TYPE_KEY] = "H"
+                    };
+                    NetBase.DoUserInitiatedEvent(hb);
+                }
+                else
+                {
+                    NetBase.DoUserInitiatedEvent(NetworkEventSerializer.Serialize(e));
+                }
             }
         }
 

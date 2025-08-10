@@ -22,6 +22,40 @@ namespace TimberNet
         public const string SET_STATE_EVENT = "SetState";
         public const string HEARTBEAT_EVENT = "Heartbeat";
         public const int MAX_BUFFER_SIZE = 8192 * 4; // 32K
+        // --- Binary frame types (first byte of uncompressed payload when length < 0) ---
+        // (We keep legacy positive length header for compressed JSON; for binary heartbeat we use a synthetic negative length marker.)
+        protected const byte FRAME_HEARTBEAT_V1 = 0x01; // followed by varint tick delta (usually 1)
+        // For now we do not negotiate capability; servers always emit legacy JSON unless idle minimal heartbeat path is taken upstream.
+
+        // Varint helper (7-bit encoding) used for tick delta
+        protected static int WriteVarUInt32(uint value, Span<byte> buffer)
+        {
+            int index = 0;
+            while (value >= 0x80)
+            {
+                buffer[index++] = (byte)(value | 0x80);
+                value >>= 7;
+            }
+            buffer[index++] = (byte)value;
+            return index;
+        }
+        protected static int ReadVarUInt32(byte[] buffer, int offset, out uint value)
+        {
+            int shift = 0;
+            uint result = 0;
+            int index = offset;
+            while (true)
+            {
+                if (index >= buffer.Length) throw new Exception("VarInt truncated");
+                byte b = buffer[index++];
+                result |= (uint)(b & 0x7F) << shift;
+                if ((b & 0x80) == 0) break;
+                shift += 7;
+                if (shift > 35) throw new Exception("VarInt too long");
+            }
+            value = result;
+            return index - offset;
+        }
 
         public delegate void MessageReceived(string message);
         public delegate void MapReceived(byte[] mapBytes);
@@ -39,6 +73,25 @@ namespace TimberNet
         public int Hash { get; private set; } = 17;
 
         public int TickCount { get; private set; }
+
+    // --- Instrumentation counters (baseline) ---
+    private long _totalBytesSent = 0;
+    private long _totalPacketsSent = 0;
+    private long _totalBytesRecv = 0;
+    private long _totalPacketsRecv = 0;
+    private long _serializeMicrosAccum = 0;
+    private int _framesMeasured = 0;
+    private int _lastMetricsLogTick = 0;
+    // Rolling window (simple) – reset every MetricsLogIntervalTicks
+    private long _windowBytesSent = 0;
+    private long _windowPacketsSent = 0;
+    private long _windowBytesRecv = 0;
+    private long _windowPacketsRecv = 0;
+    private long _windowSerializeMicros = 0;
+    protected virtual int MetricsLogIntervalTicks => 200; // configurable via override if needed
+    // Per-event type counters (compressed bytes)
+    private readonly Dictionary<string, (long count, long bytes)> _sentEventType = new Dictionary<string, (long count, long bytes)>();
+    private readonly Dictionary<string, (long count, long bytes)> _recvEventType = new Dictionary<string, (long count, long bytes)>();
 
         public int TicksBehind
         {
@@ -176,12 +229,45 @@ namespace TimberNet
         protected void SendEvent(ISocketStream client, JObject message)
         {
             Log($"Sending: {GetType(message)} for tick {GetTick(message)}");
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
             byte[] buffer = MessageToBuffer(message);
+            var end = System.Diagnostics.Stopwatch.GetTimestamp();
+            AccumSerializeTime(start, end);
 
             try
             {
-                SendLength(client, buffer.Length);
-                client.Write(buffer, 0, buffer.Length);
+                // If this is a heartbeat event and very small, substitute with a binary heartbeat frame
+                var msgType = GetType(message);
+                if (msgType == HEARTBEAT_EVENT || msgType == "H")
+                {
+                    // Binary frame layout (uncompressed, no gzip):
+                    // 4-byte length header (network order) where length is frameSize | 0x80000000 to mark raw frame (negative when int32)
+                    // 1 byte frame type
+                    // varint tick delta (ticksSinceLoad - TickCount) but since TickCount may be same we send absolute tick as delta from 0 for now
+                    int tick = GetTick(message);
+                    // For simplicity first impl encodes absolute tick (could be delta to last sent tick later)
+                    Span<byte> payload = stackalloc byte[1 + 5];
+                    int p = 0;
+                    payload[p++] = FRAME_HEARTBEAT_V1;
+                    p += WriteVarUInt32((uint)tick, payload.Slice(p));
+                    int frameSize = p; // bytes after header
+                    int headerValue = frameSize | unchecked((int)0x80000000); // high bit set marks raw frame (no compression)
+                    byte[] outBuf = new byte[HEADER_SIZE + frameSize];
+                    byte[] headerBytes = BitConverter.GetBytes(headerValue);
+                    if (BitConverter.IsLittleEndian) Array.Reverse(headerBytes);
+                    Array.Copy(headerBytes, 0, outBuf, 0, HEADER_SIZE);
+                    for (int i = 0; i < frameSize; i++) outBuf[HEADER_SIZE + i] = payload[i];
+                    client.Write(outBuf, 0, outBuf.Length);
+                    RegisterSend(outBuf.Length); // already includes header
+                    TryCountEvent(_sentEventType, (msgType == "H" ? "H" : HEARTBEAT_EVENT) + "(bin)", outBuf.Length);
+                }
+                else
+                {
+                    SendLength(client, buffer.Length);
+                    client.Write(buffer, 0, buffer.Length);
+                    RegisterSend(buffer.Length + HEADER_SIZE); // include header
+                    TryCountEvent(_sentEventType, msgType, buffer.Length + HEADER_SIZE);
+                }
             } catch (Exception e)
             {
                 Log($"Error sending event: {e.Message}");
@@ -202,7 +288,6 @@ namespace TimberNet
             }
             if (BitConverter.IsLittleEndian)
                 Array.Reverse(headerBuffer);
-
             length = BitConverter.ToInt32(headerBuffer, 0);
             return true;
         }
@@ -237,11 +322,44 @@ namespace TimberNet
 
                 //Log($"Starting to read {messageLength} bytes");
                 // TODO: How should this fail and not hang if map stops sending?
-                byte[] buffer = client.ReadUntilComplete(messageLength);
-
-                string message = BufferToStringMessage(buffer);
-                //Log($"Queuing message of length {messageLength} bytes");
-                receivedEventQueue.Enqueue(message);
+                bool rawFrame = (messageLength & unchecked((int)0x80000000)) != 0;
+                int payloadLength = messageLength & 0x7FFFFFFF;
+                byte[] buffer = client.ReadUntilComplete(payloadLength);
+                if (rawFrame)
+                {
+                    // Interpret raw binary frame
+                    if (payloadLength == 0) { Log("Empty raw frame"); continue; }
+                    byte frameType = buffer[0];
+                    if (frameType == FRAME_HEARTBEAT_V1)
+                    {
+                        // Parse varint absolute tick
+                        ReadVarUInt32(buffer, 1, out uint absTick);
+                        // Reconstruct minimal JSON equivalent for existing pipeline
+                        var hb = new JObject();
+                        hb[TICKS_KEY] = (int)absTick;
+                        hb[TYPE_KEY] = HEARTBEAT_EVENT; // full name so higher layers still filter
+                        string json = hb.ToString(Newtonsoft.Json.Formatting.None);
+                        receivedEventQueue.Enqueue(json);
+                        RegisterRecv(payloadLength + HEADER_SIZE);
+                        TryCountEvent(_recvEventType, HEARTBEAT_EVENT + "(bin)", payloadLength + HEADER_SIZE);
+                    }
+                    else
+                    {
+                        Log($"Unknown frame type {frameType}; skipping");
+                    }
+                }
+                else
+                {
+                    string message = BufferToStringMessage(buffer);
+                    receivedEventQueue.Enqueue(message);
+                    RegisterRecv(payloadLength + HEADER_SIZE);
+                    try
+                    {
+                        var obj = Newtonsoft.Json.Linq.JObject.Parse(message);
+                        TryCountEvent(_recvEventType, GetType(obj), payloadLength + HEADER_SIZE);
+                    }
+                    catch { }
+                }
                 messageCount++;
             }
         }
@@ -360,6 +478,7 @@ namespace TimberNet
             if (!Started) return;
             ProcessReceivedMap();
             ProcessReceivedEventsQueue();
+            MaybeLogMetrics();
 
         }
 
@@ -369,7 +488,7 @@ namespace TimberNet
         }
 
         private bool ShouldReadEvent(JObject message)
-        { 
+        {
             string type = GetType(message);
             return !(type == SET_STATE_EVENT || type == HEARTBEAT_EVENT);
         }
@@ -387,6 +506,69 @@ namespace TimberNet
             List<JObject> toProcess = PopEventsToProcess(receivedEvents);
             toProcess.ForEach(e => ProcessReceivedEvent(e));
             return FilterEvents(toProcess);
+        }
+
+        // --- Instrumentation helpers ---
+        private void RegisterSend(int bytes)
+        {
+            _totalBytesSent += bytes;
+            _totalPacketsSent++;
+            _windowBytesSent += bytes;
+            _windowPacketsSent++;
+        }
+
+        private void RegisterRecv(int bytes)
+        {
+            _totalBytesRecv += bytes;
+            _totalPacketsRecv++;
+            _windowBytesRecv += bytes;
+            _windowPacketsRecv++;
+        }
+
+        private void AccumSerializeTime(long startTimestamp, long endTimestamp)
+        {
+            // Stopwatch timestamp to microseconds
+            long freq = System.Diagnostics.Stopwatch.Frequency;
+            long deltaTicks = endTimestamp - startTimestamp;
+            long micros = (long)(deltaTicks * 1_000_000L / freq);
+            _serializeMicrosAccum += micros;
+            _windowSerializeMicros += micros;
+            _framesMeasured++;
+        }
+
+        private void MaybeLogMetrics()
+        {
+            if (TickCount - _lastMetricsLogTick < MetricsLogIntervalTicks) return;
+            _lastMetricsLogTick = TickCount;
+            if (MetricsLogIntervalTicks <= 0) return;
+            double avgPktSizeSent = _windowPacketsSent == 0 ? 0 : (double)_windowBytesSent / _windowPacketsSent;
+            double avgPktSizeRecv = _windowPacketsRecv == 0 ? 0 : (double)_windowBytesRecv / _windowPacketsRecv;
+            double avgSerializeMicros = _framesMeasured == 0 ? 0 : (double)_windowSerializeMicros / _framesMeasured;
+            Log($"NET METRICS window={MetricsLogIntervalTicks} ticks | sent={_windowBytesSent}B/{_windowPacketsSent}pkts (avg {avgPktSizeSent:F1} B) | recv={_windowBytesRecv}B/{_windowPacketsRecv}pkts (avg {avgPktSizeRecv:F1} B) | serializeAvg={avgSerializeMicros:F1} us | totals sent={_totalBytesSent}B recv={_totalBytesRecv}B");
+            Log(TopEventsSummary());
+            // Explicit cumulative totals line for easier external parsing
+            double totalSerializePerPkt = _totalPacketsSent == 0 ? 0 : (double)_serializeMicrosAccum / _totalPacketsSent;
+            Log($"NET TOTALS sent={_totalBytesSent}B/{_totalPacketsSent}pkts recv={_totalBytesRecv}B/{_totalPacketsRecv}pkts serializeAvgPerSentPkt={totalSerializePerPkt:F1}us");
+            _windowBytesSent = _windowPacketsSent = 0;
+            _windowBytesRecv = _windowPacketsRecv = 0;
+            _windowSerializeMicros = 0;
+            _framesMeasured = 0;
+        }
+
+        private static void TryCountEvent(Dictionary<string,(long count,long bytes)> dict, string type, int bytes)
+        {
+            if (string.IsNullOrEmpty(type)) return;
+            if (dict.TryGetValue(type, out var v))
+                dict[type] = (v.count + 1, v.bytes + bytes);
+            else
+                dict[type] = (1, bytes);
+        }
+
+        private string TopEventsSummary(int topN = 5)
+        {
+            string Format(Dictionary<string,(long count,long bytes)> d) => string.Join(", ", d.OrderByDescending(kv => kv.Value.bytes).Take(topN)
+                .Select(kv => $"{kv.Key}:{kv.Value.count}c/{kv.Value.bytes}B"));
+            return $"EVENT TYPES sent[{Format(_sentEventType)}] recv[{Format(_recvEventType)}]";
         }
 
         public bool HasEventsForTick(int tickSinceLoad)
