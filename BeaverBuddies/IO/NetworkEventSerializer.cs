@@ -45,32 +45,10 @@ namespace BeaverBuddies.IO
         public static JObject Serialize(ReplayEvent e)
         {
             var serializer = JsonSerializer.Create(Settings);
-            if (e is BeaverBuddies.GroupedEvent ge)
-            {
-                // Build root manually so we can inject type into each inner event
-                var root = new JObject
-                {
-                    ["type"] = TypeToName[e.GetType()],
-                    ["ticksSinceLoad"] = e.ticksSinceLoad
-                };
-                var arr = new JArray();
-                foreach (var inner in ge.events)
-                {
-                    var child = JObject.FromObject(inner, serializer);
-                    child["type"] = TypeToName[inner.GetType()];
-                    child["ticksSinceLoad"] = inner.ticksSinceLoad;
-                    arr.Add(child);
-                }
-                root["events"] = arr;
-                return root;
-            }
-            else
-            {
-                var obj = JObject.FromObject(e, serializer);
-                obj["type"] = TypeToName[e.GetType()];
-                obj["ticksSinceLoad"] = e.ticksSinceLoad; // ensure presence
-                return obj;
-            }
+            var obj = JObject.FromObject(e, serializer);
+            obj["type"] = TypeToName[e.GetType()];
+            obj["ticksSinceLoad"] = e.ticksSinceLoad; // ensure presence
+            return obj;
         }
 
         public static ReplayEvent Deserialize(JObject obj)
@@ -79,37 +57,12 @@ namespace BeaverBuddies.IO
             if (typeToken == null) return null;
             string name = typeToken.Value<string>();
             if (!NameToType.TryGetValue(name, out var t)) return null;
-            if (name == nameof(BeaverBuddies.GroupedEvent))
+            var instance = (ReplayEvent)Activator.CreateInstance(t);
+            using (var reader = obj.CreateReader())
             {
-                // Custom manual reconstruction
-                var grouped = (BeaverBuddies.GroupedEvent)Activator.CreateInstance(t);
-                grouped.ticksSinceLoad = obj["ticksSinceLoad"]?.Value<int>() ?? 0;
-                var innerArr = obj["events"] as JArray;
-                if (innerArr != null)
-                {
-                    foreach (var token in innerArr)
-                    {
-                        if (token is JObject child)
-                        {
-                            var inner = Deserialize(child);
-                            if (inner != null)
-                            {
-                                grouped.events.Add(inner);
-                            }
-                        }
-                    }
-                }
-                return grouped;
+                JsonSerializer.Create(Settings).Populate(reader, instance);
             }
-            else
-            {
-                var instance = (ReplayEvent)Activator.CreateInstance(t);
-                using (var reader = obj.CreateReader())
-                {
-                    JsonSerializer.Create(Settings).Populate(reader, instance);
-                }
-                return instance;
-            }
+            return instance;
         }
     }
 }

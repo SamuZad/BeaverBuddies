@@ -24,7 +24,7 @@ namespace BeaverBuddies.Steam
         //public readonly CSteamID lobbyID;
 
         private readonly ConcurrentQueueWithWait<byte[]> readBuffer = new ConcurrentQueueWithWait<byte[]>();
-        private int readOffset = 0;
+    // removed unused readOffset
 
         private SteamPacketListener packetListener;
 

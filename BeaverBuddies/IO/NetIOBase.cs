@@ -65,21 +65,60 @@ namespace BeaverBuddies.IO
         public virtual void WriteEvents(params ReplayEvent[] events)
         {
             if (NetBase == null) return;
-            foreach (ReplayEvent e in events)
+            // If only a single heartbeat, keep existing fast path.
+            if (events.Length == 1 && events[0] is HeartbeatEvent hbOnly)
             {
-                if (e is HeartbeatEvent)
+                var hb = new JObject
                 {
-                    // Serialize minimal heartbeat JSON (avoid TypeNameHandling & extra fields)
-                    var hb = new JObject
+                    [TimberNetBase.TICKS_KEY] = hbOnly.ticksSinceLoad,
+                    [TimberNetBase.TYPE_KEY] = "H"
+                };
+                NetBase.DoUserInitiatedEvent(hb);
+                return;
+            }
+            // If more than one event (or a single non-heartbeat), build a binary container.
+            List<JObject> serialized = new List<JObject>();
+            foreach (var e in events)
+            {
+                if (e is HeartbeatEvent hb)
+                {
+                    var obj = new JObject
                     {
-                        [TimberNetBase.TICKS_KEY] = e.ticksSinceLoad,
+                        [TimberNetBase.TICKS_KEY] = hb.ticksSinceLoad,
                         [TimberNetBase.TYPE_KEY] = "H"
                     };
-                    NetBase.DoUserInitiatedEvent(hb);
+                    serialized.Add(obj);
                 }
                 else
                 {
-                    NetBase.DoUserInitiatedEvent(NetworkEventSerializer.Serialize(e));
+                    serialized.Add(NetworkEventSerializer.Serialize(e));
+                }
+            }
+            // Use underlying server/client socket(s). For client, NetBase is TimberClient (single socket).
+            // We call SendEventsContainerForTick once per target; for server we still rely on DoUserInitiatedEvent path to broadcast.
+            // Simpler: if server, fall back to existing per-event path (will broadcast), else container.
+            if (NetBase is TimberNet.TimberServer)
+            {
+                // Fallback: send individually (server broadcast logic lives there). Future: implement server-side container broadcast.
+                foreach (var obj in serialized)
+                {
+                    NetBase.DoUserInitiatedEvent(obj);
+                }
+            }
+            else
+            {
+                // Client: send as single binary container for this tick.
+                int tick = events.Last().ticksSinceLoad; // all set above
+                var client = NetBase as TimberNet.TimberClient;
+                if (client != null)
+                {
+                    client.SendEventsContainer(tick, serialized);
+                }
+                else
+                {
+                    // Fallback (should not happen): individual
+                    foreach (var obj in serialized)
+                        NetBase.DoUserInitiatedEvent(obj);
                 }
             }
         }

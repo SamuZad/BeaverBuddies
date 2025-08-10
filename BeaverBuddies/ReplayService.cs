@@ -454,19 +454,16 @@ namespace BeaverBuddies
             }
             // Don't send an empty list to save bandwidth.
             if (events.Count == 0) return;
-            // Fast path: if the only event is a heartbeat, send it directly so we avoid
-            // the JSON GroupedEvent wrapper overhead (stepping stone before binary frame).
+            // Fast path: if only a single heartbeat, still send directly.
             if (events.Count == 1 && events[0] is HeartbeatEvent)
             {
-                // We intentionally skip RecordEventTypes here since it's conceptually not a grouped send
                 EventIO.Get().WriteEvents(events[0]);
                 return;
             }
-            // Instrumentation: record composition before wrapping
+            // Record composition of actual underlying events (no synthetic GroupedEvent wrapper anymore)
             RecordEventTypes(events);
-            GroupedEvent group = new GroupedEvent(events);
-            group.ticksSinceLoad = ticksSinceLoad;
-            EventIO.Get().WriteEvents(group);
+            // Send each underlying event so network layer can batch them into a binary container.
+            EventIO.Get().WriteEvents(events.ToArray());
         }
 
         /**
