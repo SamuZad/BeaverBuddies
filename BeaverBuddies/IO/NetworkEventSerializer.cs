@@ -19,6 +19,7 @@ namespace BeaverBuddies.IO
             TypeNameHandling = TypeNameHandling.None,
             Formatting = Formatting.None,
             ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+            NullValueHandling = NullValueHandling.Include, // Preserve null values instead of converting to empty strings
             ContractResolver = new UnityContractResolver(),
         };
 

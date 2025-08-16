@@ -874,7 +874,12 @@ namespace TimberNet
 
         private static void WriteString(MemoryStream ms, string? s)
         {
-            if (s == null) s = string.Empty;
+            if (s == null)
+            {
+                // Write special marker for null (0xFFFFFFFF)
+                WriteVarUInt32(ms, 0xFFFFFFFF);
+                return;
+            }
             byte[] data = Encoding.UTF8.GetBytes(s);
             WriteVarUInt32(ms, (uint)data.Length);
             ms.Write(data, 0, data.Length);
@@ -897,7 +902,11 @@ namespace TimberNet
                     switch (kind)
                     {
                         case BinFieldKind.String:
-                            WriteString(ms, obj[name]?.ToString());
+                            {
+                                var token = obj[name];
+                                string stringValue = (token == null || token.Type == JTokenType.Null) ? null : token.ToString();
+                                WriteString(ms, stringValue);
+                            }
                             break;
                         case BinFieldKind.Int:
                             WriteVarInt32(ms, (int?)obj[name]?.ToObject<int>() ?? 0);
@@ -1160,6 +1169,13 @@ namespace TimberNet
         private static string ReadString(byte[] bytes, ref int idx)
         {
             uint len = ReadVarUInt(bytes, ref idx);
+            
+            // Check for null marker
+            if (len == 0xFFFFFFFF)
+            {
+                return null;
+            }
+            
             int l = (int)len;
             if (idx + l > bytes.Length) l = Math.Max(0, bytes.Length - idx);
             string s = Encoding.UTF8.GetString(bytes, idx, l);
