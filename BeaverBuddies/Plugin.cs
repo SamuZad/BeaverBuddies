@@ -124,6 +124,9 @@ namespace BeaverBuddies
             harmony.PatchAll();
             AutomationEvent.ApplyAutomationPatches(harmony);
 
+            // Initialize optional mod integration patches
+            BeaverBuddies.ModCompatibility.BeaverFactionsPatcher.Initialize(harmony);
+
             // apply each advanced monomod patch manually.
             GameSaverSavePatcher.Install();
             TimeTimePatcher.Install();
