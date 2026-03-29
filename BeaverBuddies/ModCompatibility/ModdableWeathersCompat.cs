@@ -21,6 +21,9 @@ namespace BeaverBuddies.ModCompatibility
         private const string WeatherModifierSettingsServiceTypeName = "ModdableWeathers.WeatherModifiers.Settings.ModdableWeatherModifierSettingsService";
         private const string WeatherCycleStageDefinitionServiceTypeName = "ModdableWeathers.Historical.WeatherCycleStageDefinitionService";
         private const string SettingElementTypeName = "ModdableWeathers.UI.Settings.SettingElement";
+        private const string GeneralWeatherSettingsTypeName = "ModdableWeathers.Services.GeneralWeatherSettings";
+        private const string BaseWeatherSettingsInterfaceName = "ModdableWeathers.Common.Settings.IBaseWeatherSettings";
+        private const string WeatherCycleStagesPanelTypeName = "ModdableWeathers.UI.Settings.WeatherCycleStagesPanel";
         private const string WeatherSettingsDialogTypeName = "ModdableWeathers.UI.Settings.WeatherSettingsDialog";
         private const string GlobalSettingsPanelTypeName = "ModdableWeathers.UI.Settings.GlobalSettingsPanel";
         private const string WeatherSettingsExportPanelTypeName = "ModdableWeathers.UI.Settings.WeatherSettingsExportPanel";
@@ -31,6 +34,9 @@ namespace BeaverBuddies.ModCompatibility
         private static Type _modifierSettingsServiceType;
         private static Type _stageDefinitionServiceType;
         private static Type _settingElementType;
+        private static Type _generalWeatherSettingsType;
+        private static Type _baseWeatherSettingsInterface;
+        private static Type _cycleStagesPanelType;
         private static Type _weatherSettingsDialogType;
         private static Type _globalSettingsPanelType;
         private static Type _exportPanelType;
@@ -43,6 +49,10 @@ namespace BeaverBuddies.ModCompatibility
         private static MethodInfo _serializeModifierSettingsMethod;
         private static MethodInfo _loadModifierSettingsMethod;
         private static PropertyInfo _stageDefinitionsProperty;
+
+        private static MethodInfo _baseSettingsSerializeMethod;
+        private static MethodInfo _baseSettingsDeserializeMethod;
+        private static MethodInfo _cycleStagesRefreshListMethod;
 
         private static PropertyInfo _settingElementPropertyProp;
         private static PropertyInfo _settingElementSettingsProp;
@@ -69,6 +79,9 @@ namespace BeaverBuddies.ModCompatibility
                 _modifierSettingsServiceType = AccessTools.TypeByName(WeatherModifierSettingsServiceTypeName);
                 _stageDefinitionServiceType = AccessTools.TypeByName(WeatherCycleStageDefinitionServiceTypeName);
                 _settingElementType = AccessTools.TypeByName(SettingElementTypeName);
+                _generalWeatherSettingsType = AccessTools.TypeByName(GeneralWeatherSettingsTypeName);
+                _baseWeatherSettingsInterface = AccessTools.TypeByName(BaseWeatherSettingsInterfaceName);
+                _cycleStagesPanelType = AccessTools.TypeByName(WeatherCycleStagesPanelTypeName);
                 _weatherSettingsDialogType = AccessTools.TypeByName(WeatherSettingsDialogTypeName);
                 _globalSettingsPanelType = AccessTools.TypeByName(GlobalSettingsPanelTypeName);
                 _exportPanelType = AccessTools.TypeByName(WeatherSettingsExportPanelTypeName);
@@ -104,6 +117,15 @@ namespace BeaverBuddies.ModCompatibility
                 if (_stageDefinitionServiceType != null)
                 {
                     _stageDefinitionsProperty = AccessTools.Property(_stageDefinitionServiceType, "StagesDefinitions");
+                }
+                if (_baseWeatherSettingsInterface != null)
+                {
+                    _baseSettingsSerializeMethod = AccessTools.Method(_baseWeatherSettingsInterface, "Serialize");
+                    _baseSettingsDeserializeMethod = AccessTools.Method(_baseWeatherSettingsInterface, "Deserialize");
+                }
+                if (_cycleStagesPanelType != null)
+                {
+                    _cycleStagesRefreshListMethod = AccessTools.Method(_cycleStagesPanelType, "RefreshList", new Type[0]);
                 }
 
                 PatchSettingElementCallbacks(harmony);
@@ -308,6 +330,7 @@ namespace BeaverBuddies.ModCompatibility
                     weatherSettingsJson = SerializeWeatherSettings(replayService),
                     modifierSettingsJson = SerializeModifierSettings(replayService),
                     stageDefinitionsJson = SerializeStageDefinitions(replayService),
+                    generalSettingsJson = SerializeGeneralSettings(replayService),
                 });
             }
             catch (Exception ex)
@@ -333,6 +356,7 @@ namespace BeaverBuddies.ModCompatibility
                     weatherSettingsJson = SerializeWeatherSettings(replayService),
                     modifierSettingsJson = SerializeModifierSettings(replayService),
                     stageDefinitionsJson = SerializeStageDefinitions(replayService),
+                    generalSettingsJson = SerializeGeneralSettings(replayService),
                 };
             });
         }
@@ -359,6 +383,38 @@ namespace BeaverBuddies.ModCompatibility
             {
                 _deterministicRngActive = false;
                 DeterminismService.SetGamePatcherActive(typeof(ModdableWeathersPatcher), false);
+            }
+        }
+
+        internal static string SerializeGeneralSettings(IReplayContext context)
+        {
+            if (_generalWeatherSettingsType == null || _baseSettingsSerializeMethod == null) return null;
+            try
+            {
+                var service = GetSingleton(context, _generalWeatherSettingsType);
+                if (service == null) return null;
+                return _baseSettingsSerializeMethod.Invoke(service, null)?.ToString();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogWarning($"ModdableWeathers: Failed to serialize general settings: {ex.Message}");
+                return null;
+            }
+        }
+
+        internal static void LoadGeneralSettings(IReplayContext context, string json)
+        {
+            if (_generalWeatherSettingsType == null || _baseSettingsDeserializeMethod == null || string.IsNullOrEmpty(json)) return;
+            try
+            {
+                var service = GetSingleton(context, _generalWeatherSettingsType);
+                if (service == null) return;
+                var jObject = Newtonsoft.Json.Linq.JObject.Parse(json);
+                _baseSettingsDeserializeMethod.Invoke(service, new object[] { jObject });
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogWarning($"ModdableWeathers: Failed to load general settings: {ex.Message}");
             }
         }
 
@@ -466,6 +522,28 @@ namespace BeaverBuddies.ModCompatibility
             _ensureWeatherGeneratedMethod?.Invoke(generator, new object[] { cycle });
         }
 
+        internal static void RefreshCycleStagesPanel()
+        {
+            if (_cycleStagesPanelType == null || _cycleStagesRefreshListMethod == null) return;
+
+            var panels = UnityEngine.UIElements.UIElementsRuntimeUtility.GetSortedPlayerPanels();
+            foreach (var panel in panels)
+            {
+                var root = panel.visualTree;
+                if (root == null) continue;
+
+                var elements = root.Query(className: null).Build();
+                foreach (var ve in elements)
+                {
+                    if (_cycleStagesPanelType.IsInstanceOfType(ve))
+                    {
+                        try { _cycleStagesRefreshListMethod.Invoke(ve, null); }
+                        catch { }
+                    }
+                }
+            }
+        }
+
         internal static object GetSingleton(IReplayContext context, Type type)
         {
             if (type == null) return null;
@@ -494,13 +572,16 @@ namespace BeaverBuddies.ModCompatibility
         public string weatherSettingsJson;
         public string modifierSettingsJson;
         public string stageDefinitionsJson;
+        public string generalSettingsJson;
 
         public override void Replay(IReplayContext context)
         {
             ModdableWeathersPatcher.LoadWeatherSettings(context, weatherSettingsJson);
             ModdableWeathersPatcher.LoadModifierSettings(context, modifierSettingsJson);
             ModdableWeathersPatcher.LoadStageDefinitions(context, stageDefinitionsJson);
+            ModdableWeathersPatcher.LoadGeneralSettings(context, generalSettingsJson);
             ModdableWeathersPatcher.RefreshAllSettingElements();
+            ModdableWeathersPatcher.RefreshCycleStagesPanel();
         }
 
         public override string ToActionString() => "Syncing weather settings";
@@ -517,12 +598,14 @@ namespace BeaverBuddies.ModCompatibility
         public string weatherSettingsJson;
         public string modifierSettingsJson;
         public string stageDefinitionsJson;
+        public string generalSettingsJson;
 
         public override void Replay(IReplayContext context)
         {
             ModdableWeathersPatcher.LoadWeatherSettings(context, weatherSettingsJson);
             ModdableWeathersPatcher.LoadModifierSettings(context, modifierSettingsJson);
             ModdableWeathersPatcher.LoadStageDefinitions(context, stageDefinitionsJson);
+            ModdableWeathersPatcher.LoadGeneralSettings(context, generalSettingsJson);
 
             var historyRegistry = ModdableWeathersPatcher.GetHistoryRegistry(context);
             var generator = ModdableWeathersPatcher.GetWeatherGenerator(context);
