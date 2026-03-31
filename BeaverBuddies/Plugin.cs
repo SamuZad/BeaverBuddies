@@ -128,6 +128,7 @@ namespace BeaverBuddies
             BeaverBuddies.ModCompatibility.BeaverFactionsPatcher.Initialize(harmony);
             BeaverBuddies.ModCompatibility.MechanicalFilterPumpPatcher.Initialize(harmony);
             BeaverBuddies.ModCompatibility.ModdableWeathersPatcher.Initialize(harmony);
+            BeaverBuddies.ModCompatibility.RiverbornePatcher.Initialize(harmony);
 
             // apply each advanced monomod patch manually.
             GameSaverSavePatcher.Install();
